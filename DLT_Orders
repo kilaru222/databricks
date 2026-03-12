@@ -1,0 +1,78 @@
+# create streaming table for orders
+@dlt.table(
+    table_properties={"Quality": "Bronze"},
+    comment="Orders Raw data from the bronze layer"
+)
+def orders_bronze():
+    df = spark.readStream.table("dev.bronze.orders_raw")
+    return df
+# create streaming table for ordeAutolaoder orders
+@dlt.table(
+    table_properties={"Quality": "Bronze"},
+    comment="Orders Raw data for the autoloader bronze"
+)
+def orders_autoloader_bronze():
+    df = (
+        spark
+        .readStream
+        .format("cloudFiles")
+        .option("cloudFiles.schemaHints","o_orderkey long,o_custkey long,o_orderstatus string,o_totalprice decimal(18,2),o_orderdate date,o_orderpriority string,o_clerk string,o_shippriority integer,o_comment string")
+        .option("cloudFiles.schemaLocation","/Volumes/dev/etl/landing/autoloader/schemas/1/")
+        .option("cloudFiles.format","csv")
+        .option("pathGlobfilter","*.csv")
+        .option("schemaEvolutionMode","none")
+        .load("/Volumes/dev/etl/landing/files/")
+    )
+    return df
+dlt.create_streaming_table("orders_union_bronze")
+
+# Append flow
+@dlt.append_flow(
+    target="orders_union_bronze"
+)
+def order_delta_append():
+    df=spark.readStream.table("orders_bronze")
+    return df
+
+# Append flow
+@dlt.append_flow(
+    target="orders_union_bronze"
+)
+def order_autoloader_append():
+    df=spark.readStream.table("orders_autoloader_bronze")
+    return df
+# create materialized view for customer
+@dlt.table(
+    table_properties={"Quality": "Bronze"},
+    comment="Customer Raw data from the bronze layer"
+)
+def customer_bronze():
+    df=spark.read.table("dev.bronze.customer_raw")
+    return df
+# create view for customer & orders join
+@dlt.view(
+    comment="Joined view"
+)
+def joined_vw():
+    df_c = spark.read.table("customer_bronze")
+    df_o = spark.read.table("orders_union_bronze")
+    df_join = df_c.join(df_o,how="left_outer",on=df_c.c_custkey==df_o.o_custkey)
+    return df_join
+# create materialized view for Silver
+from pyspark.sql.functions import current_timestamp, count
+@dlt.table(
+    table_properties={"Quality": "Silver"},
+    comment="Data for silver layer"
+)
+def orders_silver():
+    df = spark.read.table("joined_vw").withColumn("__insert_date",current_timestamp())
+    return df
+# Aggregated data for Gold
+@dlt.table(
+    table_properties={"Quality": "Gold"},
+    comment="Data for gold layer"
+)
+def orders_agg_gold():
+    df=spark.read.table("orders_silver")
+    df_agg = df.groupBy("c_mktsegment").agg(count("o_orderkey").alias("sum_orders")).withColumn("__insert_date",current_timestamp())
+    return df_agg
